@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <title>TA Explorer Web - Pro Axes & Colors</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        body { background-color: #f3f4f6; color: #1f2937; }
+        .glass-panel { background: white; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); padding: 16px; }
+        .xtick text:hover, .ytick text:hover { fill: #2563eb !important; font-weight: bold; cursor: text; }
+        /* Stile per gli input numerici piccoli */
+        .z-input { width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #d1d5db; border-radius: 4px; }
+    </style>
+</head>
+<body class="p-6 h-screen flex flex-col font-sans">
+
+    <div class="flex justify-between items-center mb-6">
+        <div>
+            <h1 class="text-3xl font-bold text-gray-800">Transient Absorption Explorer</h1>
+            <p class="text-sm text-gray-600 mt-1">💡 Assi X e Y modificabili al clic. Usa i controlli qui a destra per la scala Colori e Tempi.</p>
+        </div>
+        
+        <div class="flex items-center gap-4 bg-white p-3 rounded-lg shadow-sm border border-gray-200">
+            
+            <div class="flex flex-col mr-2 border-r border-gray-300 pr-4">
+                <label class="text-xs font-semibold text-gray-500 mb-1">Scala Colori (ΔT/T):</label>
+                <div class="flex gap-2 items-center">
+                    <input type="number" step="any" id="zMinInput" class="z-input bg-gray-50 text-gray-900" placeholder="Min (Auto)">
+                    <span class="text-xs text-gray-400">a</span>
+                    <input type="number" step="any" id="zMaxInput" class="z-input bg-gray-50 text-gray-900" placeholder="Max (Auto)">
+                </div>
+            </div>
+
+            <div class="flex flex-col mr-4">
+                <label class="text-xs font-semibold text-gray-500 mb-1">Asse Tempi:</label>
+                <select id="timeScaleSelector" class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded focus:ring-blue-500 focus:border-blue-500 block p-1 cursor-pointer">
+                    <option value="symlog" selected>SymLog</option>
+                    <option value="linear">Lineare</option>
+                    <option value="log">Logaritmica</option>
+                </select>
+            </div>
+
+            <input type="file" id="fileInput" accept=".json" class="block text-sm text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer w-56"/>
+            <button id="clearBtn" class="bg-red-500 hover:bg-red-600 text-white text-sm font-semibold py-1.5 px-3 rounded-md shadow transition">
+                Pulisci Pin
+            </button>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-12 grid-rows-2 gap-4 flex-grow min-h-0">
+        <div class="glass-panel col-span-7 row-span-1 h-full w-full" id="spectrumDiv"></div>
+        
+        <div class="glass-panel col-span-5 row-span-1 h-full flex flex-col justify-center items-center bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100">
+            <h2 class="text-xl font-semibold mb-4 text-blue-800">Coordinate Cursore</h2>
+            <div id="infoBox" class="text-lg text-gray-700 space-y-2 text-center">
+                <p>Nessun file caricato.</p>
+                <p class="text-sm">Seleziona un file JSON in alto a destra.</p>
+            </div>
+        </div>
+        
+        <div class="glass-panel col-span-7 row-span-1 h-full w-full" id="mapDiv"></div>
+        <div class="glass-panel col-span-5 row-span-1 h-full w-full" id="kineticsDiv"></div>
+    </div>
+
+    <script>
+        let wavelengths = [], times = [], ta_matrix = [], pinned = [];
+        let timeMode = 'symlog'; 
+
+        const plotConfig = { editable: true, responsive: true, displayModeBar: true, displaylogo: false };
+        const layoutBase = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: '#f8f9fa', margin: { t: 40, b: 40, l: 60, r: 20 } };
+        
+        let layoutMap = { ...layoutBase, title: 'Mappa 2D (ΔT/T)', xaxis: { title: 'Wavelength (nm)' }, yaxis: { title: 'Time Delay (ps)' } };
+        let layoutSpectrum = { ...layoutBase, title: 'Taglio Spettrale', xaxis: { title: 'Wavelength (nm)' }, yaxis: { title: 'ΔT/T' } };
+        let layoutKinetics = { ...layoutBase, title: 'Cinetica', xaxis: { title: 'Time Delay (ps)' }, yaxis: { title: 'ΔT/T' } };
+
+        Plotly.newPlot('mapDiv', [], layoutMap, plotConfig);
+        Plotly.newPlot('spectrumDiv', [], layoutSpectrum, plotConfig);
+        Plotly.newPlot('kineticsDiv', [], layoutKinetics, plotConfig);
+
+        function transformTimes(tArray) {
+            if (timeMode === 'linear' || timeMode === 'log') return [...tArray];
+            return tArray.map(t => Math.asinh(t)); 
+        }
+
+        function getAxisSettings() {
+            if (timeMode === 'linear') return { type: 'linear', tickmode: 'auto' };
+            if (timeMode === 'log') return { type: 'log', tickmode: 'auto' };
+            
+            const tickValuesRaw = [-10, -5, -2, -1, 0, 1, 2, 5, 10, 50, 100, 500, 1000, 5000];
+            const validTicks = tickValuesRaw.filter(t => t >= Math.min(...times) && t <= Math.max(...times));
+            
+            return {
+                type: 'linear',
+                tickmode: 'array',
+                tickvals: validTicks.map(t => Math.asinh(t)),
+                ticktext: validTicks.map(t => t.toString())
+            };
+        }
+
+        function initPlots() {
+            if (!ta_matrix || ta_matrix.length === 0) return;
+            
+            const plotTimes = transformTimes(times);
+            const axisSettings = getAxisSettings();
+            
+            layoutMap.yaxis = { ...layoutMap.yaxis, ...axisSettings };
+            layoutKinetics.xaxis = { ...layoutKinetics.xaxis, ...axisSettings };
+
+            const hoverTextMap = ta_matrix.map((row, i) => 
+                row.map((val, j) => `W: ${wavelengths[j].toFixed(1)} nm<br>T: ${times[i].toFixed(3)} ps<br>ΔT/T: ${val.toExponential(3)}`)
+            );
+
+            // Lettura dei limiti Z impostati dall'utente
+            let zMinVal = document.getElementById('zMinInput').value;
+            let zMaxVal = document.getElementById('zMaxInput').value;
+            
+            let heatmapTrace = {
+                z: ta_matrix, x: wavelengths, y: plotTimes, text: hoverTextMap,
+                type: 'heatmap', colorscale: 'RdBu', reversescale: true, 
+                hovertemplate: '%{text}<extra></extra>'
+            };
+
+            // Applica zmin e zmax solo se l'utente ha scritto qualcosa, altrimenti usa zmid: 0 (Auto)
+            if (zMinVal !== "" && zMaxVal !== "") {
+                heatmapTrace.zmin = parseFloat(zMinVal);
+                heatmapTrace.zmax = parseFloat(zMaxVal);
+                // Rimuove zmid per non forzare la simmetria se l'utente sceglie limiti asimmetrici
+            } else {
+                heatmapTrace.zmid = 0;
+            }
+
+            Plotly.react('mapDiv', [heatmapTrace], layoutMap, plotConfig);
+            updateCuts(null, null);
+        }
+
+        function updateCuts(hover_t_idx, hover_w_idx) {
+            const plotTimes = transformTimes(times);
+            
+            let specTraces = pinned.map((p, i) => ({ x: wavelengths, y: ta_matrix[p.t_idx], mode: 'lines', name: `Pin ${p.t.toFixed(2)} ps`, line: {width: 2.5} }));
+            let kinTraces = pinned.map((p, i) => ({ x: plotTimes, y: ta_matrix.map(row => row[p.w_idx]), customdata: times, mode: 'lines', name: `Pin ${p.w.toFixed(1)} nm`, line: {width: 2.5}, hovertemplate: 'T: %{customdata:.2f} ps<br>ΔT/T: %{y:.2e}<extra></extra>' }));
+
+            if (hover_t_idx !== null && hover_w_idx !== null) {
+                specTraces.push({ x: wavelengths, y: ta_matrix[hover_t_idx], mode: 'lines', name: `Hover ${times[hover_t_idx].toFixed(2)} ps`, line: {dash: 'dash', color: '#1f2937', width: 1.5} });
+                kinTraces.push({ x: plotTimes, y: ta_matrix.map(row => row[hover_w_idx]), customdata: times, mode: 'lines', name: `Hover ${wavelengths[hover_w_idx].toFixed(1)} nm`, line: {dash: 'dash', color: '#1f2937', width: 1.5}, hovertemplate: 'T: %{customdata:.2f} ps<br>ΔT/T: %{y:.2e}<extra></extra>' });
+            }
+
+            Plotly.react('spectrumDiv', specTraces, layoutSpectrum, plotConfig);
+            Plotly.react('kineticsDiv', kinTraces, layoutKinetics, plotConfig);
+        }
+
+        // Event Listeners
+        document.getElementById('timeScaleSelector').addEventListener('change', function(e) {
+            timeMode = e.target.value;
+            initPlots(); 
+        });
+
+        // Aggiorna la mappa quando si preme Invio o si esce dai campi Min/Max
+        ['zMinInput', 'zMaxInput'].forEach(id => {
+            document.getElementById(id).addEventListener('change', initPlots);
+        });
+
+        const mapDivElement = document.getElementById('mapDiv');
+        mapDivElement.on('plotly_hover', function(data) {
+            if(!data || !data.points || ta_matrix.length === 0) return;
+            let pt = data.points[0];
+            let t_idx = pt.pointIndex[0];
+            let w_idx = pt.pointIndex[1];
+            document.getElementById('infoBox').innerHTML = `<p><strong>Wavelength:</strong> ${wavelengths[w_idx].toFixed(1)} nm</p><p><strong>Time:</strong> ${times[t_idx].toFixed(3)} ps</p><p><strong>Signal:</strong> ${pt.z.toExponential(3)}</p>`;
+            updateCuts(t_idx, w_idx);
+        });
+
+        mapDivElement.on('plotly_click', function(data) {
+            if(!data || !data.points || ta_matrix.length === 0) return;
+            let pt = data.points[0];
+            let t_idx = pt.pointIndex[0];
+            let w_idx = pt.pointIndex[1];
+            pinned.push({ w: wavelengths[w_idx], t: times[t_idx], w_idx: w_idx, t_idx: t_idx });
+            updateCuts(t_idx, w_idx);
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => { 
+            pinned = []; 
+            updateCuts(null, null); 
+            document.getElementById('infoBox').innerHTML = "<p>Pin azzerati.</p><p>Passa il mouse sulla mappa.</p>";
+        });
+
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            let file = e.target.files[0];
+            if (!file) return;
+            let reader = new FileReader();
+            reader.onload = function(event) {
+                try {
+                    let json_data = JSON.parse(event.target.result);
+                    if (!json_data.matrix || !json_data.times || !json_data.wavelengths) throw new Error("Formato JSON non valido.");
+                    times = json_data.times; wavelengths = json_data.wavelengths; ta_matrix = json_data.matrix; pinned = [];
+                    // Reset input limiti Z al caricamento di un nuovo file
+                    document.getElementById('zMinInput').value = "";
+                    document.getElementById('zMaxInput').value = "";
+                    initPlots();
+                    document.getElementById('infoBox').innerHTML = "<p>Dati caricati!</p><p>Passa il mouse sulla mappa.</p>";
+                } catch (error) { alert("⚠️ ERRORE CARICAMENTO: " + error.message); }
+            };
+            reader.readAsText(file);
+        });
+    </script>
+</body>
+</html>
